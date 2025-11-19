@@ -4,6 +4,7 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+import json
 
 class AirQualityAgent:
     def __init__(self, api_key, pdf_path):
@@ -108,3 +109,40 @@ class AirQualityAgent:
             return response.text
         except Exception as e:
             return f"Maaf, terjadi kesalahan koneksi ke Gemini: {str(e)}"
+        
+    def compare_multi_area_quality(self, area_name, aggregated_data, user_query):
+        """
+        Analisis perbandingan untuk banyak lokasi (Multi-Area).
+        aggregated_data adalah list of dict berisi ringkasan data tiap kota.
+        """
+        # Mengambil konteks umum tentang standar polusi
+        relevant_docs = self.get_relevant_context("PM2.5 PM10 comparison dangerous levels")
+        context_text = "\n\n".join([doc.page_content for doc in relevant_docs])
+        
+        # Convert data to readable string json
+        data_str = json.dumps(aggregated_data, indent=2)
+
+        prompt = f"""
+        Kamu adalah Konsultan Kebijakan Lingkungan. User menanyakan tentang wilayah luas: "{area_name}".
+        
+        --- DATA RINGKASAN MULTI-LOKASI ---
+        {data_str}
+        
+        --- CONTEXT (WHO) ---
+        {context_text}
+        
+        --- PERTANYAAN USER ---
+        {user_query}
+        
+        Tugas:
+        1. Bandingkan kualitas udara antar lokasi tersebut. Mana yang paling bersih dan paling kotor?
+        2. Identifikasi pola umum (misal: rata-rata wilayah ini sedang buruk/baik).
+        3. Berikan rekomendasi kebijakan atau saran kesehatan umum untuk warga di area "{area_name}".
+        """
+        try:
+            response = self.model.generate_content(prompt)
+            return response.text
+        except Exception as e:
+            return f"Error Gemini Multi-Area: {str(e)}"
+        
+    
