@@ -52,7 +52,6 @@ if "last_processed_coords" not in st.session_state:
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = [{"role": "assistant", "content": "Halo! Tanyakan kondisi udara di kota mana saja (misal: 'Bagaimana udara di Jawa Barat?' atau 'Cek Jakarta')."}]
 
-
 col_map, col_chat = st.columns([1.8, 1.2])
 
 
@@ -111,25 +110,56 @@ with col_chat:
                     summary_data = []
                     prog_bar = st.progress(0)
                     
-                    for i, (name, lat, lon) in enumerate(coords_list):
-                        # Fetch data udara
-                        res = data_fetcher.get_air_quality_by_coords(lat, lon)
-                        if res and "data" in res:
+                    if len(coords_list) > 1:
+                        for i, (name, lat, lon) in enumerate(coords_list):
+                            # Fetch data udara
+                            res = data_fetcher.get_air_quality_by_coords(lat, lon)
+        
                             # Ambil snapshot terakhir untuk Summary
-                            latest = res["data"].iloc[-1]
+                            valid_data = res["data"].dropna(subset=['pm2_5'])
+                            latest = valid_data.iloc[-1]
                             s_dict = {
-                                "city": name,
-                                "pm2_5": float(latest.get("pm2_5", 0)),
-                                "pm10": float(latest.get("pm10", 0))
-                            }
+                                        "city": name,
+                                        "pm2_5": float(latest.get("pm2_5", 0)),
+                                        "pm10": float(latest.get("pm10", 0))
+                                    }
                             summary_data.append(s_dict)
-                            
-                            # Simpan data lengkap untuk marker di peta
+                                    # Simpan data lengkap untuk marker di peta
                             st.session_state.multi_area_results.append({
-                                "name": name, "lat": lat, "lon": lon, 
-                                "data": res["data"], "summary": s_dict
-                            })
+                                        "name": name, "lat": lat, "lon": lon, 
+                                        "data": res["data"], "summary": s_dict
+                                    })
                         prog_bar.progress((i + 1) / len(coords_list))
+                                    
+                    else:
+                        
+                        # Ambil tuple pertama: (name, lat, lon)
+                        name, lat, lon = coords_list[0]
+                        
+                        res = data_fetcher.get_air_quality_by_coords(lat, lon)
+                        
+                        if res and "data" in res:
+                            res["data"] = res["data"].dropna(subset=['pm2_5'])
+                            
+                            # Simpan ke state api_result (untuk chart detail)
+                            st.session_state.api_result = res
+                            st.session_state.multi_area_results = []
+
+                            # Siapkan summary data agar konsisten (List of Dict)
+                            if not res["data"].empty:
+                                latest = res["data"].iloc[-1]
+                                s_dict = {
+                                    "city": name,
+                                    "pm2_5": float(latest.get("pm2_5", 0)),
+                                    "pm10": float(latest.get("pm10", 0))
+                                }
+                                summary_data.append(s_dict)
+
+                            
+                                st.session_state.multi_area_results.append({
+                                    "name": name, "lat": lat, "lon": lon,
+                                    "data": res["data"], "summary": s_dict
+                                })
                     
                     prog_bar.empty()
                     status_msg.empty()
@@ -153,6 +183,7 @@ with col_chat:
                             with st.spinner("Menganalisis satu lokasi..."):
                                 latest_json = full_res["data"].tail(24).to_json(orient="records")
                                 response_text = aq_agent.analyze_air_quality(user_prompt, latest_json)
+                                print(latest_json)
 
                         else:
                             # Multi Area Analysis (Bandingkan banyak kota)

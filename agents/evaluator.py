@@ -116,7 +116,7 @@ class AirQualityAgent:
         aggregated_data adalah list of dict berisi ringkasan data tiap kota.
         """
         # Mengambil konteks umum tentang standar polusi
-        relevant_docs = self.get_relevant_context("PM2.5 PM10 comparison dangerous levels")
+        relevant_docs = self.get_relevant_context("PM2.5 PM10 comparison dangerous levels NO2 SO2 Ozone guidelines limits health effects")
         context_text = "\n\n".join([doc.page_content for doc in relevant_docs])
         
         # Convert data to readable string json
