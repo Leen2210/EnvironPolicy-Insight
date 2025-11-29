@@ -93,7 +93,9 @@ with col_chat:
                 print(loc_intent)
 
             # === CASE A: User meminta Lokasi Baru (Single/Multi) ===
-            if loc_intent:
+            # Hanya proses jika intent adalah "single", "subareas", atau "multi"
+            # Jika intent adalah "none", skip ke CASE B (pertanyaan konteks)
+            if loc_intent and loc_intent.get("intent") in ["single", "subareas", "multi"]:
                 status_msg = st.empty()
                 area_label = None
 

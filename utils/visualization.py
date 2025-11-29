@@ -44,22 +44,6 @@ def display_multi_area_comparison(multi_area_results):
     # Gabungkan semua data
     df_combined = pd.concat(all_data, ignore_index=True)
     
-    # Fungsi helper untuk membuat line chart per parameter
-    def create_line_chart(df, param_col, city_col="city", time_col="time", title=""):
-        """Helper untuk membuat line chart dengan multiple cities"""
-        if param_col not in df.columns:
-            return False
-        
-        # Buat pivot: time sebagai index, city sebagai columns
-        df_chart = df[[time_col, city_col, param_col]].copy()
-        df_chart = df_chart.set_index([time_col, city_col])[param_col].unstack(level=city_col)
-        
-        if not df_chart.empty:
-            st.caption(title)
-            st.line_chart(df_chart, use_container_width=True)
-            return True
-        return False
-    
     # Helper function untuk membuat line chart
     def make_line_chart(df, param_col, title):
         """Membuat line chart untuk parameter tertentu dengan multiple cities"""

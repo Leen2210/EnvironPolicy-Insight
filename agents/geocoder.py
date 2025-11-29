@@ -32,10 +32,11 @@ class GeocoderAgent:
         "{user_query}"
 
         Tugas:
-        Deteksi maksud user mengenai lokasi geografis. Klasifikasikan ke dalam tiga intent:
+        Deteksi maksud user mengenai lokasi geografis. Klasifikasikan ke dalam empat intent:
         1. "single"  → User hanya menyebut 1 lokasi (dengan atau tanpa level administratif).
         2. "subareas" → User meminta daftar sub-area dari sebuah wilayah.
         3. "multi" → User menyebut beberapa area sekaligus.
+        4. "none" → User TIDAK meminta area baru, hanya bertanya tentang data yang sudah ada atau pertanyaan umum.
 
         Gunakan aturan berikut:
 
@@ -63,20 +64,31 @@ class GeocoderAgent:
             "Kecamatan X dan Y pada Kota Z"
             "Cidadap dan Cicendo dalam Bandung"
 
+        E. NONE / CONTEXT QUESTION (PENTING!)
+        - Jika user TIDAK menyebut nama area baru, hanya bertanya tentang:
+            • Data yang sudah ditampilkan: "apakah ini berbahaya?", "bagaimana kualitas udaranya?", "apakah aman?"
+            • Pertanyaan umum tanpa area: "apa itu PM2.5?", "bagaimana cara membaca data ini?"
+            • Perbandingan dengan area lain: "bandingkan dengan Jakarta", "lebih buruk dari mana?"
+            • Pertanyaan analisis: "apa penyebabnya?", "kapan waktu terbaik?"
+        - Jika user hanya bertanya tentang konteks tanpa menyebut area baru → intent = "none"
+
         Output JSON Schema:{{
-        "intent": "single" | "subareas" | "multi",
+        "intent": "single" | "subareas" | "multi" | "none",
         "level": "province" | "city" | "regency" | "district" | "village" | null,
-        "areas": ["Area1", "Area2", ...],
+        "areas": ["Area1", "Area2", ...] | [],
         "parent_area": "Nama wilayah induk atau null"}}
 
         CATATAN:
+        - Jika intent = "none", maka areas = [] dan parent_area = null
         - "areas" selalu berupa list:
             • single → 1 item
             • subareas → daftar sub-area yang diminta
             • multi → daftar area yang disebut user
+            • none → [] (kosong)
         - "parent_area" hanya digunakan untuk sub-area request.
         
         PENTING:
+        - Jika user TIDAK menyebut nama area baru, PASTIKAN intent = "none"
         - Jawab HANYA dalam format JSON yang valid.
         - Jangan menambahkan teks, penjelasan, komentar, catatan, atau markdown.
         - Output HARUS dimulai dengan karakter pertama '{' dan berakhir dengan '}'.
