@@ -1,0 +1,218 @@
+import google.generativeai as genai
+from geopy.geocoders import Nominatim
+from typing import List, Tuple, Optional, Dict, Any
+import json
+
+class GeocoderAgent:
+    """
+    Agent untuk memecah area geografis menjadi sub-area:
+    - Provinsi -> List Kota/Kabupaten
+    - Kota/Kabupaten -> List Kecamatan
+    Dan mendapatkan koordinatnya.
+    """
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        # Konfigurasi Gemini
+        genai.configure(api_key=self.api_key)
+        
+        # PENTING: Gunakan gemini-1.5-flash yang support JSON Mode native
+        self.model = genai.GenerativeModel(
+            "gemini-2.5-flash",
+            generation_config={"response_mime_type": "application/json"}
+        )
+        self.geolocator = Nominatim(user_agent="environpolicy_insight_geocoder")
+        
+    def extract_location_from_query(self, user_query: str) -> Optional[Dict[str, Any]]:
+        """
+        Mendeteksi nama lokasi target dari input user dan intent-nya.
+        """
+        prompt = f"""
+        Analisis kalimat user berikut:
+
+        "{user_query}"
+
+        Tugas:
+        Deteksi maksud user mengenai lokasi geografis. Klasifikasikan ke dalam tiga intent:
+        1. "single"  → User hanya menyebut 1 lokasi (dengan atau tanpa level administratif).
+        2. "subareas" → User meminta daftar sub-area dari sebuah wilayah.
+        3. "multi" → User menyebut beberapa area sekaligus.
+
+        Gunakan aturan berikut:
+
+        A. SINGLE LOCATION (NO LEVEL)
+        - Jika user hanya menyebut nama wilayah tanpa level administratif.
+        Contoh: "Jawa Barat", "Indonesia", "Bandung"
+
+        B. SINGLE LOCATION (WITH LEVEL)
+        - Jika input mengandung level administratif:
+        ["provinsi", "kota", "kabupaten", "kecamatan", "desa", "kelurahan"]
+
+        C. SUB-AREA REQUEST (POLA)
+        - Pola eksplisit:
+        "<level> di <wilayah>"
+        "<level> dalam <wilayah>"
+        "<level> pada <wilayah>"
+        "<level>-<level> <wilayah>"
+        "list <level> <wilayah>"
+        "<level> <area> dalam <wilayah>"
+        Contoh: "kota di Jawa Timur", "kecamatan-kecamatan Surabaya"
+
+        D. MULTI AREA LIST
+        - Jika user menyebut lebih dari satu area:
+        contoh:
+            "Coblong, Sukajadi, Cidadap Bandung"
+            "Kecamatan X dan Y pada Kota Z"
+            "Cidadap dan Cicendo dalam Bandung"
+
+        Output JSON Schema:{
+        {
+        "intent": "single" | "subareas" | "multi",
+        "level": "province" | "city" | "regency" | "district" | "village" | null,
+        "areas": ["Area1", "Area2", ...],
+        "parent_area": "Nama wilayah induk atau null"
+        }
+        }
+
+        CATATAN:
+        - "areas" selalu berupa list:
+            • single → 1 item
+            • subareas → level sub-area yang diminta (misal: ["kota", "kecamatan"]) atau list kosong
+            • multi → daftar area yang disebut user
+        - "parent_area" hanya digunakan untuk sub-area request dan single point yang merupakan bagian dari wilayah yang lebih besar.
+        
+        PENTING:
+        - Jawab HANYA dalam format JSON yang valid.
+        - Jangan menambahkan teks, penjelasan, komentar, catatan, atau markdown.
+        - Output HARUS dimulai dengan karakter pertama '{' dan berakhir dengan '}'.
+        """
+
+        try:
+            response = self.model.generate_content(prompt)
+            response_json = json.loads(response.text)
+            return response_json
+        except Exception as e:
+            print(f"[Geocoder] Error extract location: {e}")
+            return None
+
+    def _get_regions_from_area(self, user_query: str) -> List[str]:
+        """
+        Meminta AI memecah wilayah berdasarkan hirarki administratif, 
+        berdasarkan query asli user.
+        """
+        # Gunakan query mentah agar AI bisa mengurai level yang diminta ("kota", "kecamatan")
+        prompt = f"""
+        Analisis permintaan user berikut: '{user_query}'.
+        
+        Tugas: Jika user secara eksplisit meminta sub-area (misalnya 'kota di Jawa Timur' atau 'kecamatan-kecamatan Surabaya'), 
+        buatkan daftar **maksimal 5** nama sub-area yang representatif.
+        
+        ATURAN:
+        1. Jika user meminta 'kota/kabupaten' di tingkat provinsi, berikan 10 Kota/Kabupaten yang paling terkenal/padat.
+        2. Jika user meminta 'kecamatan' di tingkat kota/kabupaten, berikan 10 Kecamatan yang paling terkenal/padat.
+        3. Jika permintaan tidak jelas atau bukan permintaan sub-area, kembalikan list kosong [].
+
+        Output JSON:
+        {{ "sub_areas": ["Sub Area 1", "Sub Area 2", ...] }}
+        
+        PENTING:
+        - Jawab HANYA dalam format JSON yang valid.
+        - Jangan menambahkan teks, penjelasan, komentar, catatan, atau markdown.
+        - Output HARUS dimulai dengan karakter pertama '{' dan berakhir dengan '}'.
+        """
+
+        try:
+            response = self.model.generate_content(prompt)
+            print(f"[Geocoder] response: {response}")
+            data = json.loads(response.text)
+            # Filter untuk memastikan hasilnya list string valid
+            sub_areas = [str(item).strip() for item in data.get("sub_areas", []) if str(item).strip()]
+            return sub_areas
+        except Exception as e:
+            print(f"[Geocoder] Error AI decomposition: {e}")
+            return []
+
+    def get_coordinates_for_area(
+        self, 
+        user_query: str, 
+        area_name: str, 
+        intent_data: Dict[str, Any]
+    ) -> List[Tuple[str, float, float]]:
+        """
+        Mengembalikan list tuples (nama, lat, lon) berdasarkan intent:
+        1. Single: Hanya 1 koordinat.
+        2. Multi/Subareas: Banyak koordinat.
+        
+        area_name adalah nama wilayah induk yang akan dipecah (misal: "Jawa Timur").
+        """
+        results: List[Tuple[str, float, float]] = []
+        is_single_point = False
+        sub_regions: List[str] = []
+        intent_type = intent_data.get("intent")
+
+        # 1. PENENTUAN MODE: SINGLE atau MULTI/SUB-AREA
+        if intent_type == "single":
+            # Jika intent adalah single, ini adalah single point.
+            is_single_point = True
+            
+        elif intent_type == "multi":
+            # Jika multi, area yang akan digeocoding sudah ada di 'areas'
+            sub_regions = intent_data.get("areas", [])
+            
+        elif intent_type == "subareas":
+            # Jika subareas, panggil AI decomposition untuk mendapatkan daftar sub-area
+            # Gunakan query mentah agar AI tahu level (kecamatan atau kota)
+            sub_regions = self._get_regions_from_area(user_query)
+
+        
+        # Jika sub_regions masih kosong, ini dianggap single point (kecuali multi, yang harusnya ada isinya)
+        if not sub_regions and intent_type != "multi":
+            is_single_point = True
+        
+        
+        # 2. GEOCODING (Single vs Multi)
+        
+        # Geocode wilayah induk (untuk single point atau fallback)
+        try:
+            single_loc = self.geolocator.geocode(area_name)
+        except:
+            single_loc = None
+            
+        if is_single_point:
+            # KONDISI SINGLE POINT: Ambil koordinat pusat area_name
+            if single_loc:
+                # Format nama (ambil sebelum koma)
+                display_name = single_loc.address.split(",")[0]
+                return [(display_name, single_loc.latitude, single_loc.longitude)]
+            return []
+
+        # KONDISI MULTI AREA/SUB-AREA (Looping Kecamatan atau Kota):
+        print(f"[Geocoder] Breaking down '{area_name}' into: {sub_regions}")
+        
+        for name in sub_regions:
+            try:
+                # KONSTRUKSI QUERY PINTAR:
+                # Gabungkan "Nama Sub Area, Nama Area Induk" (Contoh: "Gubeng, Surabaya")
+                query_geo = f"{name}, {area_name}" 
+                location = self.geolocator.geocode(query_geo)
+                
+                if location:
+                    # Gunakan nama sub-area sebagai label (Title Case)
+                    disp_name = name.title() 
+                    results.append((disp_name, location.latitude, location.longitude))
+                else:
+                     # Coba Geocode nama sub-area saja jika gabungan gagal
+                     location = self.geolocator.geocode(name)
+                     if location:
+                        disp_name = name.title()
+                        results.append((disp_name, location.latitude, location.longitude))
+
+            except Exception as e:
+                print(f"Error geocoding {query_geo}: {e}")
+                continue
+        
+        # Fallback: Jika loop gagal total tapi single_loc ada, kembalikan pusat area
+        if not results and single_loc:
+             print(f"[Geocoder] Fallback to single point for {area_name}.")
+             return [(single_loc.address.split(",")[0], single_loc.latitude, single_loc.longitude)]
+
+        return results

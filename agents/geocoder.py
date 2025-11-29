@@ -1,133 +1,252 @@
 import google.generativeai as genai
 from geopy.geocoders import Nominatim
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict, Any
 import json
 
 class GeocoderAgent:
     """
-    Agent untuk memecah area geografis besar menjadi sub-area (kota) 
-    dan mendapatkan koordinatnya.
+    Agent untuk memecah area geografis menjadi sub-area:
+    - Provinsi -> List Kota/Kabupaten
+    - Kota/Kabupaten -> List Kecamatan
+    Dan mendapatkan koordinatnya.
     """
     def __init__(self, api_key: str):
         self.api_key = api_key
         # Konfigurasi Gemini
         genai.configure(api_key=self.api_key)
-        self.model = genai.GenerativeModel("gemini-2.5-flash")
+        
+        # PENTING: Gunakan gemini-2.5-flash yang support JSON Mode native
+        self.model = genai.GenerativeModel(
+            "gemini-2.5-flash",
+            generation_config={"response_mime_type": "application/json"}
+        )
         self.geolocator = Nominatim(user_agent="environpolicy_insight_geocoder")
         
     def extract_location_from_query(self, user_query: str) -> Optional[str]:
         """
-        Mendeteksi apakah user menyebutkan nama lokasi spesifik (Provinsi/Negara/Pulau)
-        yang membutuhkan analisis multi-area.
+        Mendeteksi nama lokasi target dari input user.
         """
         prompt = f"""
-        Analisis kalimat user: "{user_query}"
+        Analisis kalimat user berikut:
+
+        "{user_query}"
+
+        Tugas:
+        Deteksi maksud user mengenai lokasi geografis. Klasifikasikan ke dalam tiga intent:
+        1. "single"  → User hanya menyebut 1 lokasi (dengan atau tanpa level administratif).
+        2. "subareas" → User meminta daftar sub-area dari sebuah wilayah.
+        3. "multi" → User menyebut beberapa area sekaligus.
+
+        Gunakan aturan berikut:
+
+        A. SINGLE LOCATION (NO LEVEL)
+        - Jika user hanya menyebut nama wilayah tanpa level administratif.
+        Contoh: "Jawa Barat", "Indonesia", "Bandung"
+
+        B. SINGLE LOCATION (WITH LEVEL)
+        - Jika input mengandung level administratif:
+        ["provinsi", "kota", "kabupaten", "kecamatan", "desa", "kelurahan"]
+
+        C. SUB-AREA REQUEST (POLA)
+        - Pola eksplisit:
+        "<level> di <wilayah>"
+        "<level> dalam <wilayah>"
+        "<level> pada <wilayah>"
+        "<level>-<level> <wilayah>"
+        "list <level> <wilayah>"
+        "<level> <area> dalam <wilayah>"
+
+        D. MULTI AREA LIST
+        - Jika user menyebut lebih dari satu area:
+        contoh:
+            "Coblong, Sukajadi, Cidadap Bandung"
+            "Kecamatan X dan Y pada Kota Z"
+            "Cidadap dan Cicendo dalam Bandung"
+
+        Output JSON Schema:{{
+        "intent": "single" | "subareas" | "multi",
+        "level": "province" | "city" | "regency" | "district" | "village" | null,
+        "areas": ["Area1", "Area2", ...],
+        "parent_area": "Nama wilayah induk atau null"}}
+
+        CATATAN:
+        - "areas" selalu berupa list:
+            • single → 1 item
+            • subareas → daftar sub-area yang diminta
+            • multi → daftar area yang disebut user
+        - "parent_area" hanya digunakan untuk sub-area request.
         
-        Tugas: Ekstrak nama lokasi geografis target jika user ingin:
-        1. Mengetahui kondisi di lokasi tersebut.
-        2. Membandingkan lokasi saat ini dengan lokasi tersebut (Contoh: "Bandingkan dengan Surabaya").
-        
-        Jika user HANYA bertanya medis/umum tanpa menyebut lokasi baru, kembalikan null.
-        
-        Contoh:
-        - "Cek Jakarta" -> {{"location": "Jakarta"}}
-        - "Bagaimana jika dibandingkan dengan Surabaya?" -> {{"location": "Surabaya"}}
-        - "Apakah polusi berbahaya?" -> {{"location": null}}
-        
-        Output HANYA JSON:
+        PENTING:
+        - Jawab HANYA dalam format JSON yang valid.
+        - Jangan menambahkan teks, penjelasan, komentar, catatan, atau markdown.
+        - Output HARUS dimulai dengan karakter pertama '{' dan berakhir dengan '}'.
         """
-        # Apakah user meminta data kualitas udara untuk suatu lokasi geografis (Kota, Provinsi, Negara)?
-        # Jika YA, sebutkan nama lokasi tersebut dalam format JSON.
-        # Jika TIDAK (hanya pertanyaan umum atau medis), kembalikan null.
-        
-        # Contoh 1: "Bagaimana udara di Jawa Timur?" -> {{"location": "Jawa Timur"}}
-        # Contoh 2: "Apakah PM2.5 berbahaya?" -> {{"location": null}}
-        # Contoh 3: "Cek polusi Jakarta" -> {{"location": "Jakarta"}}
+
         try:
             response = self.model.generate_content(prompt)
-            text = response.text.strip().replace("```json", "").replace("```", "")
-            data = json.loads(text)
-            return data.get("location")
-        except Exception:
+            data = json.loads(response.text)
+            return data
+        except Exception as e:
+            print(f"[Geocoder] Error extract location: {e}")
             return None
 
-    def _get_cities_from_area(self, area_name: str) -> List[str]:
+    def _get_regions_from_area(self, user_query: str, area_name: str, intent_data: Dict[str, Any]) -> List[str]:
         """
-        Menggunakan Gemini untuk mendapatkan daftar kota/kabupaten 
-        di dalam area yang ditentukan.
+        Meminta AI memecah wilayah menjadi sub-area berdasarkan level yang diminta.
+        Mengembalikan daftar NAMA SUB-AREA yang sebenarnya (bukan kata level).
         """
+        level = intent_data.get("level")
+        parent_area = intent_data.get("parent_area", area_name)
+        
+        # Mapping level ke bahasa Indonesia
+        level_map = {
+            "province": "provinsi",
+            "city": "kota",
+            "regency": "kabupaten", 
+            "district": "kecamatan",
+            "village": "desa"
+        }
+        level_id = level_map.get(level, level) if level else None
+        
         prompt = f"""
-        Tugas: Apakah '{area_name}' adalah wilayah luas (Provinsi/Negara/Pulau) atau Kota/Kabupaten spesifik?
+        Tugas: Berikan daftar NAMA SUB-AREA yang sebenarnya dari wilayah '{parent_area}'.
         
-        - Jika Kota/Kabupaten spesifik (misal: Surabaya, Bandung, Jakarta Selatan), kembalikan list kosong [].
-        - Jika Wilayah Luas (misal: Jawa Timur, Indonesia), sebutkan 5-8 kota utamanya.
+        Query user: "{user_query}"
+        Level yang diminta: {level_id if level_id else 'tidak ditentukan'}
+        Wilayah induk: {parent_area}
         
-        Keluaran JSON:
-        {{
-          "cities": ["City A", "City B"] (atau [] jika itu kota spesifik)
-        }}
+        INSTRUKSI:
+        1. Jika level yang diminta adalah "kecamatan" atau "district":
+           → Berikan daftar NAMA KECAMATAN yang ada di {parent_area}.
+           → Contoh untuk Surabaya: ["Gubeng", "Sukolilo", "Wonokromo", "Tegalsari", "Simokerto", ...]
         
-        Pastikan output HANYA berisi JSON.
+        2. Jika level yang diminta adalah "kota" atau "city":
+           → Berikan daftar NAMA KOTA yang ada di {parent_area}.
+           → Contoh untuk Jawa Timur: ["Surabaya", "Malang", "Sidoarjo", "Gresik", ...]
+        
+        3. Jika level yang diminta adalah "kabupaten" atau "regency":
+           → Berikan daftar NAMA KABUPATEN yang ada di {parent_area}.
+        
+        4. Jika level yang diminta adalah "provinsi" atau "province":
+           → Berikan daftar NAMA PROVINSI yang ada di {parent_area} (biasanya untuk Indonesia).
+        
+        PENTING:
+        - Kembalikan NAMA-NAMA SUB-AREA yang SEBENARNYA, BUKAN kata "kecamatan", "kota", dll.
+        - Gunakan pengetahuan geografis Indonesia yang akurat.
+        - MAKSIMAL berikan 5 sub-area yang paling representatif/penting.
+        - Pilih sub-area yang paling dikenal atau paling relevan.
+        
+        Output JSON:
+        {{ "sub_areas": ["Nama Sub-Area 1", "Nama Sub-Area 2", "Nama Sub-Area 3", ...] }}
+        
+        CATATAN:
+        - Jawab HANYA dalam format JSON yang valid.
+        - Jangan menambahkan teks, penjelasan, komentar, catatan, atau markdown.
+        - Output HARUS dimulai dengan karakter pertama '{{' dan berakhir dengan '}}'.
         """
-        
+
         try:
             response = self.model.generate_content(prompt)
-            # Membersihkan respons untuk memastikan hanya JSON yang tersisa
-            text_content = response.text.strip().replace("```json", "").replace("```", "")
-            data = json.loads(text_content)
-            return data.get("cities", [])
+            data = json.loads(response.text)
+            sub_areas = data.get("sub_areas", [])
+            
+            # Filter: Hapus jika hanya berisi kata level (bukan nama sebenarnya)
+            filtered = []
+            level_words = ["kecamatan", "kota", "kabupaten", "provinsi", "desa", "kelurahan", "district", "city", "regency", "province"]
+            for area in sub_areas:
+                area_lower = area.lower().strip()
+                # Skip jika hanya kata level tanpa nama area
+                if area_lower not in level_words and len(area_lower) > 2:
+                    filtered.append(area)
+            
+            final_list = filtered if filtered else sub_areas
+            # Batasi maksimal 5 sub-area
+            return final_list[:5]
         except Exception as e:
-            print(f"[GeocoderAgent] Error generating content or parsing JSON: {e}")
+            print(f"[Geocoder] Error AI decomposition: {e}")
             return []
+    def get_coordinates_for_area(
+    self,
+    user_query: str,
+    area_name: str,
+    intent_data: Dict[str, Any]
+) -> List[Tuple[str, float, float]]:
+        """
+        Mengembalikan list tuples (nama, lat, lon) berdasarkan intent:
+        1. Single: Hanya 1 koordinat.
+        2. Multi/Subareas: Banyak koordinat.
+        area_name adalah nama wilayah induk yang akan dipecah (misal: "Jawa Timur").
+        """
 
-    def get_coordinates_for_area(self, area_name: str) -> List[Tuple[str, float, float]]:
-        """
-        Mengembalikan list tuples (nama, lat, lon).
-        Logika Hybrid:
-        1. Coba anggap sebagai SINGLE location dulu (Geocoding langsung).
-        2. Jika user meminta wilayah luas (detected by Gemini), cari sub-cities.
-        """
         results: List[Tuple[str, float, float]] = []
+        is_single_point = False
+        sub_regions: List[str] = []
 
-        # 1. Cek apakah ini nama kota spesifik (Single Point)
+        intent_type = intent_data.get("intent")
+
+        # ---------------------------
+        # 1. Tentukan mode
+        # ---------------------------
+        if intent_type == "single":
+            is_single_point = True
+
+        elif intent_type == "multi":
+            sub_regions = intent_data.get("areas", [])
+
+        elif intent_type == "subareas":
+            sub_regions = self._get_regions_from_area(user_query, area_name, intent_data)
+
+        # Kalau tidak dapat sub-area, fallback ke single point (kecuali explicit multi)
+        if not sub_regions and intent_type != "multi":
+            is_single_point = True
+
+        # ---------------------------
+        # 2. Coba geocode area induk untuk single atau fallback
+        # ---------------------------
         try:
             single_loc = self.geolocator.geocode(area_name)
         except:
             single_loc = None
 
-        # 2. Tanya AI apakah ini wilayah luas yang butuh dipecah?
-        # (Sederhananya: kita ambil sub-cities. Jika listnya kosong atau cuma 1 nama yang mirip input, berarti single).
-        sub_cities = self._get_cities_from_area(area_name)
-        
-        # KONDISI SINGLE POINT:
-        # Jika AI tidak menemukan sub-kota, ATAU sub-kota hanya 1 dan namanya mirip input
-        is_single_point = False
-        if not sub_cities:
-            is_single_point = True
-        elif len(sub_cities) == 1 and sub_cities[0].lower() in area_name.lower():
-            is_single_point = True
-
+        # ---------------------------
+        # 3. SINGLE POINT
+        # ---------------------------
         if is_single_point:
             if single_loc:
-                return [(single_loc.address.split(",")[0], single_loc.latitude, single_loc.longitude)]
+                display_name = single_loc.address.split(",")[0]
+                return [(display_name, single_loc.latitude, single_loc.longitude)]
             return []
 
-        # KONDISI MULTI AREA:
-        # Loop sub-cities dan geocode satu per satu
-        for name in sub_cities:
+        # ---------------------------
+        # 4. MULTI / SUB-AREAS
+        # ---------------------------
+        print(f"[Geocoder] Breaking down '{area_name}' into: {sub_regions}")
+
+        for name in sub_regions:
             try:
-                # Tambahkan konteks area agar akurat (misal: "Bandung, Jawa Barat")
-                query_geo = f"{name}, {area_name}" 
+                query_geo = f"{name}, {area_name}"
                 location = self.geolocator.geocode(query_geo)
+
                 if location:
-                    # Ambil nama depan saja biar pendek di peta
                     disp_name = name.title()
                     results.append((disp_name, location.latitude, location.longitude))
-            except Exception:
+                    continue
+
+                # fallback: geocode nama sub-area saja
+                location = self.geolocator.geocode(name)
+                if location:
+                    disp_name = name.title()
+                    results.append((disp_name, location.latitude, location.longitude))
+
+            except Exception as e:
+                print(f"Error geocoding {name}: {e}")
                 continue
-        
-        # Fallback: Jika loop gagal semua tapi single_loc ada, kembalikan single loc
+
+        # ---------------------------
+        # 5. Fallback terakhir ke single_loc bila tidak ada hasil
+        # ---------------------------
         if not results and single_loc:
-             return [(single_loc.address.split(",")[0], single_loc.latitude, single_loc.longitude)]
+            print(f"[Geocoder] Fallback to single point for {area_name}.")
+            return [(single_loc.address.split(",")[0], single_loc.latitude, single_loc.longitude)]
 
         return results

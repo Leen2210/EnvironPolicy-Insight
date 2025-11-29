@@ -90,14 +90,32 @@ with col_chat:
             loc_intent = None
             with st.spinner("Menganalisis maksud pertanyaan..."):
                 loc_intent = geo_agent.extract_location_from_query(user_prompt)
+                print(loc_intent)
 
             # === CASE A: User meminta Lokasi Baru (Single/Multi) ===
             if loc_intent:
                 status_msg = st.empty()
-                status_msg.info(f"🔍 Mencari data wilayah: {loc_intent}...")
+                area_label = None
+
+                if "parent_area" in loc_intent and loc_intent["parent_area"]:
+                    area_label = loc_intent["parent_area"]
+                else:
+                    # kalau areas ada dan tidak kosong
+                    areas = loc_intent.get("areas", [])
+                    area_label = areas[0] if areas else "Area Tidak Diketahui"
+
+                status_msg.info(f"🔍 Mencari data wilayah: {area_label}...")
                 
                 # Geocoding (Bisa return 1 atau banyak koordinat)
-                coords_list = geo_agent.get_coordinates_for_area(loc_intent)
+                area_to_process = loc_intent.get("parent_area") or loc_intent.get("areas", [""])[0]
+                
+                # Panggil dengan data intent lengkap
+                coords_list = geo_agent.get_coordinates_for_area(
+                    user_query=user_prompt,
+                    area_name=area_to_process,
+                    intent_data=loc_intent
+                )
+                print(coords_list)
                 
                 if not coords_list:
                     response_text = f"Maaf, tidak ditemukan data lokasi untuk '{loc_intent}'."
@@ -121,7 +139,11 @@ with col_chat:
                             s_dict = {
                                         "city": name,
                                         "pm2_5": float(latest.get("pm2_5", 0)),
-                                        "pm10": float(latest.get("pm10", 0))
+                                        "pm10": float(latest.get("pm10", 0)),
+                                        "no2": float(latest.get("nitrogen_dioxide", 0)),
+                                        "so2": float(latest.get("sulphur_dioxide", 0)),
+                                        "ozone": float(latest.get("ozone", 0)),
+                                        "co": float(latest.get("carbon_monoxide", 0))
                                     }
                             summary_data.append(s_dict)
                                     # Simpan data lengkap untuk marker di peta
@@ -129,7 +151,7 @@ with col_chat:
                                         "name": name, "lat": lat, "lon": lon, 
                                         "data": res["data"], "summary": s_dict
                                     })
-                        prog_bar.progress((i + 1) / len(coords_list))
+                            prog_bar.progress((i + 1) / len(coords_list))
                                     
                     else:
                         
@@ -151,7 +173,11 @@ with col_chat:
                                 s_dict = {
                                     "city": name,
                                     "pm2_5": float(latest.get("pm2_5", 0)),
-                                    "pm10": float(latest.get("pm10", 0))
+                                    "pm10": float(latest.get("pm10", 0)),
+                                    "no2": float(latest.get("nitrogen_dioxide", 0)),
+                                    "so2": float(latest.get("sulphur_dioxide", 0)),
+                                    "ozone": float(latest.get("ozone", 0)),
+                                    "co": float(latest.get("carbon_monoxide", 0))
                                 }
                                 summary_data.append(s_dict)
 
@@ -183,7 +209,7 @@ with col_chat:
                             with st.spinner("Menganalisis satu lokasi..."):
                                 latest_json = full_res["data"].tail(24).to_json(orient="records")
                                 response_text = aq_agent.analyze_air_quality(user_prompt, latest_json)
-                                print(latest_json)
+                                # print(latest_json)
 
                         else:
                             # Multi Area Analysis (Bandingkan banyak kota)
@@ -281,17 +307,24 @@ with col_map:
             lat, lon = clicked_coords
             with st.spinner(f"Mengambil data udara untuk ({lat:.4f}, {lon:.4f})..."):
                 result = data_fetcher.get_air_quality_by_coords(lat, lon)
-
-            # Simpan state
-            st.session_state.api_result = result
+            
+            # Pastikan result adalah dict dan ada data
+            if result and "data" in result:
+                # Bersihkan data dari NaN
+                result["data"] = result["data"].dropna(subset=['pm2_5'])
+                # Simpan state dengan struktur dict yang benar
+                st.session_state.api_result = result
+            else:
+                st.session_state.api_result = None
             # Reset mode multi-area agar fokus ke single point
             st.session_state.multi_area_results = [] 
             st.session_state.last_processed_coords = clicked_coords
             
             #Tambahkan notifikasi ke chat
+            location_name = result.get('location_name', 'Koordinat Baru') if result and isinstance(result, dict) else 'Koordinat Baru'
             st.session_state.chat_history.append({
                 "role": "assistant", 
-                "content": f"✅ Data diperbarui manual dari peta: {result.get('location_name', 'Koordinat Baru')}"
+                "content": f"✅ Data diperbarui manual dari peta: {location_name}"
             })
             st.rerun()
 
@@ -324,11 +357,27 @@ with col_map:
         df_sum = pd.DataFrame(summary_list)
         
         if not df_sum.empty:
-            # Highlight PM2.5 dengan warna
+            # Rename kolom untuk display yang lebih baik
+            display_columns = {
+                'city': 'Kota',
+                'pm2_5': 'PM2.5 (µg/m³)',
+                'pm10': 'PM10 (µg/m³)',
+                'no2': 'NO₂ (µg/m³)',
+                'so2': 'SO₂ (µg/m³)',
+                'ozone': 'Ozone (µg/m³)',
+                'co': 'CO (µg/m³)'
+            }
+            df_display = df_sum.rename(columns=display_columns)
+            
+            # Highlight semua parameter dengan warna
+            numeric_cols = [col for col in df_display.columns if col != 'Kota']
             st.dataframe(
-                df_sum.style.background_gradient(subset=['pm2_5'], cmap='RdYlGn_r'),
+                df_display.style.background_gradient(subset=numeric_cols, cmap='RdYlGn_r'),
                 use_container_width=True
             )
+            
+            # Tampilkan grafik perbandingan
+            visualization.display_multi_area_comparison(st.session_state.multi_area_results)
  
     
     else:
