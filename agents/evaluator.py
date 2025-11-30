@@ -5,6 +5,7 @@ from langchain_community.vectorstores import FAISS
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 import json
+import re 
 
 class AirQualityAgent:
     def __init__(self, api_key, pdf_path):
@@ -84,24 +85,33 @@ class AirQualityAgent:
         # 1. Cari konteks
         search_query = f"{user_query} PM2.5 PM10 NO2 SO2 Ozone guidelines limits health effects"
         relevant_docs = self.get_relevant_context(search_query)
-        context_text = "\n\n".join([doc.page_content for doc in relevant_docs])
-
+        # === PERBAIKAN 1: BERSIHKAN TEKS DARI ARTEFAK PDF ===
+        raw_context = "\n\n".join([doc.page_content for doc in relevant_docs])
+        
+        # Bersihkan karakter aneh seperti /uni0037 (biasanya simbol %)
+        clean_context = raw_context.replace("/uni0037", "%").replace("uni0037", "%")
+        # Hapus karakter kontrol non-ascii jika perlu (opsional)
+        clean_context = re.sub(r'[^\x00-\x7F]+', ' ', clean_context) 
+        # ====================================================
         # 2. Prompt untuk Gemini
         prompt = f"""
         Kamu adalah Ahli Analisis Kualitas Udara.
         
-        Tugas: Jawab pertanyaan pengguna berdasarkan DATA REAL-TIME dan PANDUAN WHO.
+        Tugas: Jawab pertanyaan pengguna berdasarkan DATA REAL-TIME di bawah dan PANDUAN WHO.
         
         --- DATA KUALITAS UDARA (Real-time) ---
         {air_quality_json}
         
-        --- REFERENSI DARI WHO GUIDELINES (Konteks Relevan) ---
-        {context_text}
+        --- REFERENSI WHO (Konteks) ---
+        {clean_context}
         
         --- PERTANYAAN PENGGUNA ---
         {user_query}
         
-        Berikan analisis risiko kesehatan singkat dan rekomendasi konkret dalam Bahasa Indonesia.
+        INSTRUKSI PENTING:
+        1. LOKASI: Jika data JSON di atas memiliki koordinat yang valid, ASUMSIKAN ITU ADALAH LOKASI YANG DIMINTA USER (misal: Makassar), meskipun nama kotanya tidak tertulis eksplisit di JSON. Jangan ragu.
+        2. KONTEKS: Jika ada teks referensi yang sulit dibaca (artefak PDF), abaikan bagian yang rusak dan fokus pada angka pedoman WHO yang bisa dibaca.
+        3. Berikan analisis risiko kesehatan singkat dan rekomendasi konkret.
         """
 
         try:

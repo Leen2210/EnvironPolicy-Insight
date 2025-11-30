@@ -22,11 +22,13 @@ class GeocoderAgent:
         )
         self.geolocator = Nominatim(user_agent="environpolicy_insight_geocoder")
         
-    def extract_location_from_query(self, user_query: str) -> Optional[str]:
+    def extract_location_from_query(self, user_query: str, current_date:str) -> Optional[str]:
         """
         Mendeteksi nama lokasi target dari input user.
         """
         prompt = f"""
+        konteks waktu saat ini : {current_date}
+
         Analisis kalimat user berikut:
 
         "{user_query}"
@@ -76,7 +78,10 @@ class GeocoderAgent:
         "intent": "single" | "subareas" | "multi" | "none",
         "level": "province" | "city" | "regency" | "district" | "village" | null,
         "areas": ["Area1", "Area2", ...] | [],
-        "parent_area": "Nama wilayah induk atau null"}}
+        "parent_area": "Nama wilayah induk atau null", 
+        "date_range": {{
+            "start": "YYYY-MM-DD",
+            "end": "YYYY-MM-DD}}}}
 
         CATATAN:
         - Jika intent = "none", maka areas = [] dan parent_area = null

@@ -118,7 +118,7 @@ def get_locations(country_code="ID", limit=200):
         return None
 
 
-def get_air_quality_by_coords(lat, lon, radius_km=200):
+def get_air_quality_by_coords(lat, lon,start_date=None, end_date=None, radius_km=200):
     """
     Ambil data kualitas udara berdasarkan latitude dan longitude.
     Jika lokasi utama tidak memiliki data, otomatis mencari stasiun terdekat.
@@ -134,6 +134,9 @@ def get_air_quality_by_coords(lat, lon, radius_km=200):
             "&hourly=pm10,pm2_5,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,ozone"
             "&timezone=auto"
         )
+        if start_date and end_date:
+            url += f"&start_date={start_date}&end_date={end_date}"
+            print(f"[data_fetcher] Mengambil data tanggal: {start_date} s.d {end_date}")
         response = requests.get(url, timeout=10)
         response.raise_for_status()
         data = response.json()

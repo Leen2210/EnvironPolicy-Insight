@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 import os
 import pandas as pd
 import json
+from datetime import date
 
 load_dotenv()
 
@@ -88,9 +89,22 @@ with col_chat:
             response_text = ""
             
             loc_intent = None
+            today_str = str(date.today()) # Ambil tanggal hari ini (misal: 2025-11-30)
+            print(today_str)
             with st.spinner("Menganalisis maksud pertanyaan..."):
-                loc_intent = geo_agent.extract_location_from_query(user_prompt)
+                loc_intent = geo_agent.extract_location_from_query(user_prompt, current_date=today_str)
                 print(loc_intent)
+
+            # Ambil hasil deteksi tanggal dari AI
+            date_range = loc_intent.get("date_range", {})
+            req_start = date_range.get("start")
+            req_end = date_range.get("end")
+            
+            # Tampilkan info ke user tanggal berapa yang sedang dilihat
+            if req_start == req_end:
+                 st.info(f"📅 Menampilkan data untuk tanggal: **{req_start}**")
+            else:
+                 st.info(f"📅 Menampilkan data periode: **{req_start}** s.d **{req_end}**")
 
             # === CASE A: User meminta Lokasi Baru (Single/Multi) ===
             # Hanya proses jika intent adalah "single", "subareas", atau "multi"
@@ -133,7 +147,15 @@ with col_chat:
                     if len(coords_list) > 1:
                         for i, (name, lat, lon) in enumerate(coords_list):
                             # Fetch data udara
-                            res = data_fetcher.get_air_quality_by_coords(lat, lon)
+                            res = data_fetcher.get_air_quality_by_coords(
+                            lat, lon, 
+                            start_date=req_start, 
+                            end_date=req_end)
+
+                            if res is None or "data" not in res:
+                                print(f"⚠️ Gagal mengambil data untuk {name}, skipping...")
+                                prog_bar.progress((i + 1) / len(coords_list))
+                                continue  # Lanjut ke kota berikutnya
         
                             # Ambil snapshot terakhir untuk Summary
                             valid_data = res["data"].dropna(subset=['pm2_5'])
@@ -160,7 +182,10 @@ with col_chat:
                         # Ambil tuple pertama: (name, lat, lon)
                         name, lat, lon = coords_list[0]
                         
-                        res = data_fetcher.get_air_quality_by_coords(lat, lon)
+                        res = data_fetcher.get_air_quality_by_coords(
+                        lat, lon, 
+                        start_date=req_start, 
+                        end_date=req_end)
                         
                         if res and "data" in res:
                             res["data"] = res["data"].dropna(subset=['pm2_5'])
@@ -209,9 +234,23 @@ with col_chat:
                             
                             # Analisis Single Location
                             with st.spinner("Menganalisis satu lokasi..."):
-                                latest_json = full_res["data"].tail(24).to_json(orient="records")
-                                response_text = aq_agent.analyze_air_quality(user_prompt, latest_json)
-                                # print(latest_json)
+                                # === PERBAIKAN DI SINI ===
+                                # Kita ambil nama kotanya
+                                loc_name = full_res["name"]
+                                
+                                # Convert data angka ke JSON
+                                raw_json = full_res["data"].tail(24).to_json(orient="records")
+                                
+                                # KITA TEMPEL LABELNYA SECARA MANUAL
+                                final_context = f"""
+                                LOKASI: {loc_name}
+                                SUMBER DATA: Open-Meteo Air Quality API
+                                DATA SENSOR (24 Jam Terakhir):
+                                {raw_json}
+                                """
+                                
+                                # Kirim final_context (yang ada labelnya), BUKAN raw_json
+                                response_text = aq_agent.analyze_air_quality(user_prompt, final_context)
 
                         else:
                             # Multi Area Analysis (Bandingkan banyak kota)
@@ -219,19 +258,34 @@ with col_chat:
                             with st.spinner("Membandingkan antar lokasi..."):
                                 response_text = aq_agent.compare_multi_area_quality(loc_intent, summary_data, user_prompt)
                     else:
-                        response_text = f"Data kualitas udara tidak tersedia untuk {loc_intent} saat ini."
-    
+                        area_name = loc_intent.get("parent_area") or loc_intent.get("areas", ["lokasi ini"])[0]
+                        response_text = (
+                            f"⚠️ **Data Tidak Ditemukan:**\n"
+                            f"Sistem berhasil menemukan lokasi **{area_name}**, namun gagal mengambil data kualitas udara terkini dari server.\n\n"
+                            f"Kemungkinan penyebab:\n"
+                            f"- Gangguan koneksi ke API Open-Meteo.\n"
+                            f"- Data sensor PM2.5 tidak tersedia untuk koordinat tersebut saat ini."
+                        )    
 
             # === CASE B: Pertanyaan Konteks (Tentang data yang sedang tampil) ===
             else:
                 current_context = ""
+                # Ambil nama lokasi dari state yang tersimpan
+                location_label = "Lokasi Terpilih" 
+                
                 if st.session_state.api_result:
                     # Konteks Single Point
                     df = st.session_state.api_result["data"]
-                    current_context = df.tail(24).to_json(orient="records")
+                    location_label = st.session_state.api_result.get("location_name", "Lokasi")
+                    raw_json = df.tail(24).to_json(orient="records")
+                    
+                    # TEMPEL LABEL LAGI
+                    current_context = f"LOKASI: {location_label}\nDATA:\n{raw_json}"
+                    
                 elif st.session_state.multi_area_results:
                     # Konteks Multi Area Summary
-                    current_context = json.dumps([item["summary"] for item in st.session_state.multi_area_results])
+                    raw_json = json.dumps([item["summary"] for item in st.session_state.multi_area_results])
+                    current_context = f"LOKASI: Multi-Area Comparison\nDATA:\n{raw_json}"
                 
                 if current_context:
                     with st.spinner("Menganalisis konteks data..."):
@@ -307,8 +361,15 @@ with col_map:
         if abs(clicked_coords[0] - prev_lat) > 0.0001 or abs(clicked_coords[1] - prev_lon) > 0.0001:
             
             lat, lon = clicked_coords
+
+            today_str = str(date.today())
+
             with st.spinner(f"Mengambil data udara untuk ({lat:.4f}, {lon:.4f})..."):
-                result = data_fetcher.get_air_quality_by_coords(lat, lon)
+                result = data_fetcher.get_air_quality_by_coords(
+                    lat, lon, 
+                    start_date=today_str, 
+                    end_date=today_str
+                )
             
             # Pastikan result adalah dict dan ada data
             if result and "data" in result:
