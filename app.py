@@ -109,28 +109,50 @@ with col_chat:
             # === CASE A: User meminta Lokasi Baru (Single/Multi) ===
             # Hanya proses jika intent adalah "single", "subareas", atau "multi"
             # Jika intent adalah "none", skip ke CASE B (pertanyaan konteks)
-            if loc_intent and loc_intent.get("intent") in ["single", "subareas", "multi"]:
-                status_msg = st.empty()
-                area_label = None
+            
+            # ---------------------------------------------------------
+            # 1. LOGIKA FETCHING PINTAR (TIME-AWARE & NAME-LOCKING)
+            # ---------------------------------------------------------
+            should_fetch = False
+            is_date_change = False
+            
+            # Cek 1: Lokasi Baru
+            if loc_intent.get("intent") in ["single", "subareas", "multi"]:
+                should_fetch = True
+            
+            # Cek 2: Ganti Tanggal (Lokasi Sama)
+            elif loc_intent.get("intent") == "none" and st.session_state.api_result:
+                if req_start != str(date.today()): 
+                     should_fetch = True
+                     is_date_change = True
+                     # Ambil koordinat terakhir dari memori
+                     last_lat, last_lon = st.session_state.last_processed_coords
+                     
+                     # === NAME LOCKING: Simpan nama lama agar tidak hilang ===
+                     locked_name = st.session_state.api_result.get("location_name", "Lokasi Terpilih")
+                     
+                     # Siapkan list koordinat manual (Bypass Geocoder)
+                     coords_list = [(locked_name, last_lat, last_lon)]
 
-                if "parent_area" in loc_intent and loc_intent["parent_area"]:
-                    area_label = loc_intent["parent_area"]
+            # Eksekusi Fetching
+            if should_fetch:
+                # Tentukan nama area untuk loading message
+                if is_date_change:
+                     st.info(f"🔄 Mengambil data {req_start} untuk **{locked_name}**...")
+                     # PENTING: Jangan panggil geo_agent saat ganti tanggal!
+                     # Kita sudah punya 'coords_list' yang benar di atas.
                 else:
-                    # kalau areas ada dan tidak kosong
-                    areas = loc_intent.get("areas", [])
-                    area_label = areas[0] if areas else "Area Tidak Diketahui"
+                     # Logika lama untuk lokasi baru
+                     area_label = loc_intent.get("parent_area") or loc_intent.get("areas", ["Area"])[0]
+                     st.info(f"🔍 Mencari data wilayah: {area_label}...")
+                     
+                     # Panggil Geocoder HANYA jika bukan ganti tanggal
+                     coords_list = geo_agent.get_coordinates_for_area(
+                        user_query=user_prompt,
+                        area_name=area_label,
+                        intent_data=loc_intent
+                     )
 
-                status_msg.info(f"🔍 Mencari data wilayah: {area_label}...")
-                
-                # Geocoding (Bisa return 1 atau banyak koordinat)
-                area_to_process = loc_intent.get("parent_area") or loc_intent.get("areas", [""])[0]
-                
-                # Panggil dengan data intent lengkap
-                coords_list = geo_agent.get_coordinates_for_area(
-                    user_query=user_prompt,
-                    area_name=area_to_process,
-                    intent_data=loc_intent
-                )
                 print(coords_list)
                 
                 if not coords_list:
@@ -152,6 +174,12 @@ with col_chat:
                             start_date=req_start, 
                             end_date=req_end)
 
+                            # === NAME INJECTION: Kembalikan nama yang terkunci ===
+                            if is_date_change:
+                                res["location_name"] = locked_name
+                                name = locked_name 
+                            # ===================================================
+
                             if res is None or "data" not in res:
                                 print(f"⚠️ Gagal mengambil data untuk {name}, skipping...")
                                 prog_bar.progress((i + 1) / len(coords_list))
@@ -170,7 +198,7 @@ with col_chat:
                                         "co": float(latest.get("carbon_monoxide", 0))
                                     }
                             summary_data.append(s_dict)
-                                    # Simpan data lengkap untuk marker di peta
+
                             st.session_state.multi_area_results.append({
                                         "name": name, "lat": lat, "lon": lon, 
                                         "data": res["data"], "summary": s_dict
@@ -215,7 +243,6 @@ with col_chat:
                                 })
                     
                     prog_bar.empty()
-                    status_msg.empty()
 
                     # Analisis Hasil
                     if summary_data:
@@ -250,7 +277,8 @@ with col_chat:
                                 """
                                 
                                 # Kirim final_context (yang ada labelnya), BUKAN raw_json
-                                response_text = aq_agent.analyze_air_quality(user_prompt, final_context)
+                                # response_text = aq_agent.analyze_air_quality(user_prompt, final_context)
+                                pass
 
                         else:
                             # Multi Area Analysis (Bandingkan banyak kota)
@@ -270,22 +298,50 @@ with col_chat:
             # === CASE B: Pertanyaan Konteks (Tentang data yang sedang tampil) ===
             else:
                 current_context = ""
-                # Ambil nama lokasi dari state yang tersimpan
-                location_label = "Lokasi Terpilih" 
+                location_label = "Lokasi Terpilih"
                 
+                # === [PERUBAHAN 2] SMART SLICING (Mencegah Salah Baca Tanggal) ===
+                def get_data_for_date(df, target_date):
+                    """Ambil data HANYA untuk tanggal yang diminta user"""
+                    try:
+                        # Pastikan kolom time formatnya datetime
+                        df['time'] = pd.to_datetime(df['time'])
+                        # Buat kolom bantu string tanggal (YYYY-MM-DD)
+                        df['date_str'] = df['time'].dt.strftime('%Y-%m-%d')
+                        
+                        # FILTER: Ambil baris yang tanggalnya sama dengan target_date
+                        filtered = df[df['date_str'] == target_date]
+                        
+                        # Fallback: Jika kosong (misal beda timezone), ambil 24 jam terakhir
+                        if filtered.empty:
+                            return df.tail(24)
+                        return filtered
+                    except Exception:
+                        return df.tail(24)
+
                 if st.session_state.api_result:
                     # Konteks Single Point
-                    df = st.session_state.api_result["data"]
+                    full_data = st.session_state.api_result["data"]
                     location_label = st.session_state.api_result.get("location_name", "Lokasi")
-                    raw_json = df.tail(24).to_json(orient="records")
                     
-                    # TEMPEL LABEL LAGI
-                    current_context = f"LOKASI: {location_label}\nDATA:\n{raw_json}"
+                    # POTONG DATA SESUAI TANGGAL REQUEST (req_start)
+                    # Bukan asal .tail(24) lagi
+                    relevant_data = get_data_for_date(full_data, req_start)
+                    
+                    raw_json = relevant_data.to_json(orient="records")
+                    
+                    # Tambahkan Header Tanggal agar LLM sadar konteks waktu
+                    current_context = (
+                        f"LOKASI: {location_label}\n"
+                        f"TANGGAL DATA: {req_start}\n" # <--- Jangkar Waktu
+                        f"DATA SENSOR:\n{raw_json}"
+                    )
                     
                 elif st.session_state.multi_area_results:
-                    # Konteks Multi Area Summary
+                    # Konteks Multi Area
                     raw_json = json.dumps([item["summary"] for item in st.session_state.multi_area_results])
-                    current_context = f"LOKASI: Multi-Area Comparison\nDATA:\n{raw_json}"
+                    current_context = f"LOKASI: Perbandingan Multi-Area\nTANGGAL: {req_start}\nDATA:\n{raw_json}"
+                
                 
                 if current_context:
                     with st.spinner("Menganalisis konteks data..."):
@@ -293,6 +349,53 @@ with col_chat:
                 else:
                     response_text = aq_agent.analyze_air_quality(user_prompt, "Tidak ada data real-time.")
             
+
+            # ---------------------------------------------------------
+            # 2. CONTEXT BUILDING (FORMAT TANGGAL YANG BISA DIBACA LLM)
+            # ---------------------------------------------------------
+            
+            # (Pastikan ini dijalankan setiap kali, baik fetch baru maupun tidak)
+            if not response_text: # Jika belum ada error
+                current_context = ""
+                
+                # Fungsi Helper: Filter Tanggal & Format JSON Manusiawi
+                def get_clean_json(df, target_date):
+                    try:
+                        df['time'] = pd.to_datetime(df['time'])
+                        df['date_str'] = df['time'].dt.strftime('%Y-%m-%d')
+                        
+                        # Filter sesuai tanggal request
+                        filtered = df[df['date_str'] == target_date]
+                        if filtered.empty: filtered = df.tail(24)
+                        
+                        # === KUNCI UTAMA: date_format='iso' ===
+                        # Ini mengubah 1733356800000 menjadi "2025-12-05T07:00:00"
+                        return filtered.to_json(orient="records", date_format="iso")
+                    except:
+                        return df.tail(24).to_json(orient="records", date_format="iso")
+
+                if st.session_state.api_result:
+                    # Single Point Context
+                    full_res = st.session_state.api_result
+                    raw_json = get_clean_json(full_res["data"], req_start)
+                    
+                    current_context = (
+                        f"LOKASI: {full_res['location_name']}\n"
+                        f"TANGGAL TARGET: {req_start}\n"
+                        f"DATA SENSOR (Format ISO Date):\n{raw_json}"
+                    )
+                    
+                    # Kirim ke LLM
+                    with st.spinner("Menganalisis data..."):
+                        print("DEBUG JSON TO LLM:", raw_json) # Cek terminal: Apakah isinya [] atau data penuh?
+                        response_text = aq_agent.analyze_air_quality(user_prompt, current_context)
+
+                elif st.session_state.multi_area_results:
+                     # Multi Area Context
+                     # ... (Logika multi area sama, pastikan format json string aman) ...
+                     with st.spinner("Menganalisis perbandingan..."):
+                        response_text = aq_agent.compare_multi_area_quality(loc_intent, summary_data, user_prompt)
+
             # 3. Tampilkan balasan
             with chat_container:
                 with st.chat_message("assistant"):
@@ -406,9 +509,63 @@ with col_map:
             st.success(f"📍 Lokasi: {city} ({result['latitude']:.4f}, {result['longitude']:.4f})")
             st.caption(f"🗺️ Sumber: {src}")
             
-            st.subheader("📊 Data Terkini")
-            st.dataframe(df.tail(5), use_container_width=True)
+            st.subheader("📊 Data Lengkap")
             
+            # ---------------------------------------------------------
+            # FITUR PAGINATION (Halaman per 10 baris)
+            # ---------------------------------------------------------
+            
+            # 1. Urutkan dari yang TERBARU (Opsional, tapi disarankan untuk monitoring)
+            # Agar Page 1 berisi data hari ini/besok, bukan data tahun lalu.
+            if 'time' in df.columns:
+                df_sorted = df.sort_values(by='time', ascending=True).reset_index(drop=True)
+            else:
+                df_sorted = df
+
+            # 2. Konfigurasi Halaman
+            ROWS_PER_PAGE = 10
+            total_rows = len(df_sorted)
+            total_pages = (total_rows - 1) // ROWS_PER_PAGE + 1
+            
+            # Inisialisasi state halaman jika belum ada
+            if "current_page" not in st.session_state:
+                st.session_state.current_page = 1
+                
+            # Validasi agar halaman tidak "offside" saat data berubah
+            if st.session_state.current_page > total_pages:
+                st.session_state.current_page = total_pages
+            if st.session_state.current_page < 1:
+                st.session_state.current_page = 1
+
+            # 3. Kontrol Navigasi (Tombol Previous & Next)
+            # Kita bagi kolom agar tombolnya rapi di tengah
+            c1, c2, c3, c4, c5 = st.columns([0.5, 1, 2, 1, 0.5])
+            
+            with c2:
+                # Tombol Prev (Mundur)
+                if st.button("◀️ Mundur", key="prev_btn", disabled=(st.session_state.current_page == 1)):
+                    st.session_state.current_page -= 1
+                    st.rerun()
+            
+            with c4:
+                # Tombol Next (Maju)
+                if st.button("Maju ▶️", key="next_btn", disabled=(st.session_state.current_page == total_pages)):
+                    st.session_state.current_page += 1
+                    st.rerun()
+            
+            with c3:
+                # Info Halaman
+                st.markdown(f"<div style='text-align: center; padding-top: 5px;'>Halaman <b>{st.session_state.current_page}</b> dari {total_pages}</div>", unsafe_allow_html=True)
+
+            # 4. Potong Data (Slicing) & Tampilkan
+            start_idx = (st.session_state.current_page - 1) * ROWS_PER_PAGE
+            end_idx = start_idx + ROWS_PER_PAGE
+            
+            # Tampilkan slice data
+            st.dataframe(df_sorted.iloc[start_idx:end_idx], use_container_width=True)
+            st.caption(f"Menampilkan baris {start_idx+1} s.d {min(end_idx, total_rows)} dari total {total_rows} data.")
+            # ---------------------------------------------------------
+
             visualization.display_air_quality_charts(df)
         else:
             st.warning("❌ Tidak ada data kualitas udara untuk lokasi ini.")

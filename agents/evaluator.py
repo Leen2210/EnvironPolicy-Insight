@@ -91,15 +91,17 @@ class AirQualityAgent:
         # Bersihkan karakter aneh seperti /uni0037 (biasanya simbol %)
         clean_context = raw_context.replace("/uni0037", "%").replace("uni0037", "%")
         # Hapus karakter kontrol non-ascii jika perlu (opsional)
-        clean_context = re.sub(r'[^\x00-\x7F]+', ' ', clean_context) 
+        clean_context = clean_context.replace('\x00', '')
+        clean_context = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', clean_context)
+        clean_context = re.sub(r'\s+', ' ', clean_context).strip() 
         # ====================================================
         # 2. Prompt untuk Gemini
         prompt = f"""
         Kamu adalah Ahli Analisis Kualitas Udara.
         
-        Tugas: Jawab pertanyaan pengguna berdasarkan DATA REAL-TIME di bawah dan PANDUAN WHO.
+        Tugas: Jawab pertanyaan pengguna berdasarkan DATA di bawah dan PANDUAN WHO.
         
-        --- DATA KUALITAS UDARA (Real-time) ---
+        --- DATA OBSERVASI DAN PREDIKSI UDARA ---
         {air_quality_json}
         
         --- REFERENSI WHO (Konteks) ---
